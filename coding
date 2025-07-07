@@ -1,0 +1,151 @@
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+        <groupId>org.eclipse.jgit</groupId>
+        <artifactId>org.eclipse.jgit</artifactId>
+        <version>6.9.0.202403050737-r</version>
+    </dependency>
+    <dependency>
+        <groupId>commons-io</groupId>
+        <artifactId>commons-io</artifactId>
+    </dependency>
+</dependencies>
+
+public class FileRiskReport {
+    private String filePath;
+    private String interpretabilityRisk;
+    private String legacyComplexity;
+    private String securityRisk;
+    private List<String> recommendations;
+
+    // Getters, setters, constructors
+}
+
+public class RepoRiskReport {
+    private String repoUrl;
+    private List<FileRiskReport> fileReports;
+
+    // Getters, setters, constructors
+}
+
+@Service
+public class OpenAIService {
+
+    @Value("${openai.api.key}")
+    private String apiKey;
+
+    @Value("${openai.api.url}")
+    private String apiUrl;
+
+    private final RestTemplate restTemplate;
+
+    public OpenAIService(RestTemplate restTemplate) {
+        this.restTemplate = restTemplate;
+    }
+
+    public FileRiskReport analyzeFile(Path file) throws IOException {
+        String fileContent = Files.readString(file);
+
+        String prompt = """
+            You are an AI code reviewer.
+            Analyze the following source file and return:
+            1) interpretability risk (Low/Medium/High),
+            2) legacy complexity (Low/Medium/High),
+            3) security risk (Low/Medium/High),
+            4) recommendations as a JSON list.
+
+            Respond in this format:
+            {
+              "interpretabilityRisk": "...",
+              "legacyComplexity": "...",
+              "securityRisk": "...",
+              "recommendations": [ "...", "..." ]
+            }
+
+            File content:
+            %s
+            """.formatted(fileContent);
+
+        String requestBody = """
+            {
+              "model": "gpt-4o",
+              "messages": [
+                { "role": "system", "content": "You are a helpful code risk scanner." },
+                { "role": "user", "content": "%s" }
+              ]
+            }
+            """.formatted(prompt);
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(apiKey);
+
+        HttpEntity<String> entity = new HttpEntity<>(requestBody, headers);
+
+        ResponseEntity<String> response = restTemplate.exchange(
+                apiUrl, HttpMethod.POST, entity, String.class);
+
+        String json = response.getBody();
+
+        // Use Jackson to parse GPT JSON
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode node = mapper.readTree(json);
+        String content = node.get("choices").get(0).get("message").get("content").asText();
+
+        JsonNode parsed = mapper.readTree(content);
+
+        FileRiskReport report = new FileRiskReport();
+        report.setFilePath(file.toString());
+        report.setInterpretabilityRisk(parsed.get("interpretabilityRisk").asText());
+        report.setLegacyComplexity(parsed.get("legacyComplexity").asText());
+        report.setSecurityRisk(parsed.get("securityRisk").asText());
+
+        List<String> recs = new ArrayList<>();
+        for (JsonNode n : parsed.get("recommendations")) {
+            recs.add(n.asText());
+        }
+        report.setRecommendations(recs);
+
+        return report;
+    }
+}
+
+
+@Service
+public class RepoScannerService {
+
+    private final OpenAIService openAIService;
+
+    public RepoScannerService(OpenAIService openAIService) {
+        this.openAIService = openAIService;
+    }
+
+    public RepoRiskReport scanRepo(String repoUrl) throws Exception {
+        Path tempDir = Files.createTempDirectory("repo-");
+
+        Git.cloneRepository()
+                .setURI(repoUrl)
+                .setDirectory(tempDir.toFile())
+                .call();
+
+        List<FileRiskReport> fileReports = new ArrayList<>();
+
+        Files.walk(tempDir)
+                .filter(p -> !Files.isDirectory(p))
+                .filter(p -> p.toString().endsWith(".java"))
+                .forEach(file -> {
+                    try {
+                        FileRiskReport report = openAIService.analyzeFile(file);
+                        fileReports.add(report);
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                });
+
+        return new RepoRiskReport(repoUrl, fileReports);
+    }
+}
+
