@@ -149,3 +149,10 @@ public class RepoScannerService {
     }
 }
 
+
+@PostMapping
+    public ResponseEntity<RepoRiskReport> scan(@RequestBody Map<String, String> body) throws Exception {
+        String repoUrl = body.get("repoUrl");
+        RepoRiskReport report = repoScannerService.scanRepo(repoUrl);
+        return ResponseEntity.ok(report);
+    }
